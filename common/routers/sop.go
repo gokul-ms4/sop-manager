@@ -18,7 +18,7 @@ func SopRoutes(protected *echo.Group) {
 	sop.PATCH("/:heading_id/sop_item/:item_id", controllers.UpdateSopItem)
 	sop.DELETE("/:heading_id/sop_item/:item_id", controllers.DeleteSopItem)
 
-	sop.GET("/:heading_id/generate_sop_chunk", controllers.GenerateSopChunk)
+	sop.GET("/:heading_id/position",controllers.GetSopItemPosition)
 	sop.POST("/ask_question", controllers.AskSopQuestion)
 
 }

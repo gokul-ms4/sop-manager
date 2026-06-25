@@ -8,6 +8,7 @@ import (
 	"github.com/gokul-ms4/sop-manager/common/models"
 	"github.com/gokul-ms4/sop-manager/config"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 func CreateSopHeading(c echo.Context) error {
@@ -89,9 +90,10 @@ func UpdateSopHeading(c echo.Context) error {
 	if err := config.DB.Save(&sop).Error; err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]any{
 			"success": false,
-			"error":   "FAiled to update the SOP heading",
+			"error":   "Failed to update the SOP heading",
 		})
 	}
+	config.GenerateSopHeadingChunk(int(sop.ID))
 	return c.JSON(http.StatusOK, map[string]any{
 		"success": true,
 		"response": map[string]any{
@@ -138,24 +140,7 @@ func CreateSopItem(c echo.Context) error {
 			"error":   "Sop Item Title already exists",
 		})
 	}
-	if sop.Position == nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{
-			"success": false,
-			"error":   "Sop position should be proovided",
-		})
-	}
-	var existing models.SopItem
-	if err := config.DB.Model(&models.SopItem{}).Where("heading_id = ? AND position = ?", heading.ID, sop.Position).First(&existing).Error; err == nil {
-		var maxValue int
-		config.DB.Model(&models.SopItem{}).
-			Where("heading_id = ?", heading.ID).
-			Select("COALESCE(MAX(position), 0)").
-			Scan(&maxValue)
-		return c.JSON(http.StatusBadRequest, map[string]any{
-			"success": false,
-			"error":   fmt.Sprintf("position already taken, available position = %d", maxValue+1),
-		})
-	}
+	sop.Position, _ = config.GetNextPosition(heading.ID)
 	sop.CreatedBy = userID
 	sop.HeadingID = heading.ID
 	if err := config.DB.Create(&sop).Error; err != nil {
@@ -164,6 +149,7 @@ func CreateSopItem(c echo.Context) error {
 			"error":   "Failed to create the Sop Item",
 		})
 	}
+	config.GenerateSopItemChunk(sop.ID)
 	return c.JSON(http.StatusOK, map[string]any{
 		"success": true,
 		"response": map[string]any{
@@ -228,6 +214,7 @@ func UpdateSopItem(c echo.Context) error {
 			"error":   "Failed to update the SOP heading",
 		})
 	}
+	config.GenerateSopItemChunk(sop.ID)
 	return c.JSON(http.StatusOK, map[string]any{
 		"success": true,
 		"response": map[string]any{
@@ -295,9 +282,54 @@ func DeleteSopItem(c echo.Context) error {
 			"error":   "Failed to delete the sop item",
 		})
 	}
+	var MaxPosition int
+	if err := config.DB.Model(&models.SopItem{}).Where("heading_id = ?", sopHeading.ID).
+		Select("COALESCE(MAX(position), 0)").Scan(&MaxPosition).Error; err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Failed to find the max position",
+		})
+	}
+	if sopItem.Position != MaxPosition {
+		if err := config.DB.Model(&models.SopItem{}).Where("position >= ?", sopItem.Position).Update("position", gorm.Expr("position - 1")).Error; err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]interface{}{
+				"success": false,
+				"error":   "Failed to reorder the sop items positions",
+			})
+		}
+	}
+	if err := config.DB.Where("sop_item_id = ?", sopItem.ID).Delete(&models.SopChunk{}).Error; err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Failed to delete assosiated sop chunks",
+		})
+	}
 	return c.JSON(http.StatusOK, map[string]any{
 		"success": true,
 		"message": "SOP item deleted successfully",
+	})
+}
+
+func GetSopItemPosition(c echo.Context) error {
+	headingID := c.Param("heading_id")
+	var position int
+	var heading models.SopHeading
+	if err := config.DB.First(&heading, headingID).Error; err != nil {
+		return c.JSON(http.StatusNotFound, map[string]any{
+			"success": false,
+			"error":   "Failed to find the sop heading",
+		})
+	}
+	if err := config.DB.Model(&models.SopItem{}).Where("heading_id = ?", heading.ID).
+		Select("COALESCE(MAX(position), 0)").Scan(&position).Error; err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "Failed to find the latest position",
+		})
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"success": true,
+		"data":    position + 1,
 	})
 }
 
@@ -354,61 +386,10 @@ func GetSopItems(c echo.Context) error {
 	})
 }
 
-func GenerateSopChunk(c echo.Context) error {
-	var heading models.SopHeading
-	headingID := c.Param("heading_id")
-	if err := config.DB.Preload("SopItems").First(&heading, headingID).Error; err != nil {
-		return c.JSON(http.StatusNotFound, map[string]any{
-			"success": false,
-			"error":   "Failed to find the sop heading",
-		})
-	}
-	if err := config.DB.
-		Where("sop_heading_id = ?", heading.ID).
-		Delete(&models.SopChunk{}).Error; err != nil {
-
-		return c.JSON(http.StatusBadRequest, map[string]any{
-			"success": false,
-			"error":   "Failed to clear old chunks",
-		})
-	}
-	for _, item := range heading.SopItems {
-		chunkText := fmt.Sprintf(
-			"SOP Heading: %s\nSOP Item: %s\nContent: %s",
-			heading.Heading,
-			item.Title,
-			item.Content,
-		)
-		embedding, err := config.GenerateEmbedding(chunkText)
-		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"success": false,
-				"error":   "Failed to generate embedding",
-			})
-		}
-
-		vectorString := config.Float32SliceToVectorString(embedding)
-		chunk := models.SopChunk{
-			SopHeadingID: uint(heading.ID),
-			SopItemID:    uint(item.ID),
-			ChunkText:    chunkText,
-			Embedding:    vectorString,
-		}
-		if err := config.DB.Create(&chunk).Error; err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]any{
-				"success": false,
-				"error":   "Failed to create sop chunks",
-			})
-		}
-	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"success": true,
-		"message": "Sop chunk added successfully",
-	})
-}
 func AskSopQuestion(c echo.Context) error {
 	type Request struct {
 		Question string `json:"question"`
+		Mode     string `json:"mode"`
 	}
 	var req Request
 	if err := c.Bind(&req); err != nil {
@@ -455,9 +436,40 @@ func AskSopQuestion(c echo.Context) error {
 			"answer":  "I could not find this information in the SOP.",
 		})
 	}
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+
 	var contextText string
-	for _, chunk := range chunks {
-		contextText += chunk.ChunkText + "\n\n"
+
+	if mode == "full" {
+		var heading models.SopHeading
+
+		err := config.DB.
+			Preload("SopItems", func(db *gorm.DB) *gorm.DB {
+				return db.Order("position ASC")
+			}).
+			First(&heading, chunks[0].SopHeadingID).Error
+
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]any{
+				"success": false,
+				"error":   "Failed to load full SOP process",
+			})
+		}
+
+		contextText += fmt.Sprintf("SOP Heading: %s\n\n", heading.Heading)
+
+		for _, item := range heading.SopItems {
+			contextText += fmt.Sprintf(
+				"%d. %s\n%s\n\n",
+				item.Position,
+				item.Title,
+				item.Content,
+			)
+		}
+	} else {
+		for _, chunk := range chunks {
+			contextText += chunk.ChunkText + "\n\n"
+		}
 	}
 	answer, err := config.GenerateAnswer(req.Question, contextText)
 	if err != nil {

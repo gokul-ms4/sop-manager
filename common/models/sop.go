@@ -16,7 +16,7 @@ type SopItem struct {
 	HeadingID int       `json:"heading_id" gorm:"constraint:OnDelete:CASCADE"`
 	Title     string    `json:"title"`
 	Content   string    `json:"content"`
-	Position  *int      `json:"position"`
+	Position  int      `json:"position"`
 	CreatedBy int       `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
